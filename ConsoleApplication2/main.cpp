@@ -6,8 +6,9 @@
 #include <numeric>
 #include <chrono>
 #include <ctime>
+#include <sstream>
 
-#pragma comment (lib, "ws2_32.lib") //Including library
+#pragma comment (lib, "ws2_32.lib") //Including library for networking in Windows
 
 
 constexpr auto BUFFER_LEN = 10;
@@ -26,7 +27,6 @@ void add_to_last_10(vector<uint64_t> &sens_vector, uint64_t value) {
 		sens_vector.insert(sens_vector.begin(), value);
 		sens_vector.pop_back();
 	}
-
 }
 
 //Saves sensor information to "Sensor data.txt" in csv format
@@ -52,32 +52,49 @@ uint64_t get_v_ave(vector<uint64_t> sens_vector) {
 	}
 }
 
-/*
+//Gets the average of all values in "Sensor data.txt"
 uint64_t get_ave(int sensor) {
-	uint64_t average;
-	
-	string line;
+
+	uint64_t	average = 0;
+	int			nr_of_readings = 0, multiplier = 1;
+
+	string				line, value, sens_nr, value_type;
+
 	ifstream file;
 
-	// Open an existing file 
 	file.open("Sensor data.txt", ios::in);
 
+	while (getline(file, line)) {				//getting the line fro file
+		stringstream ss(line);					//breaking it down to words
+		getline(ss, sens_nr, ',');
+
+		if (stoi(sens_nr) == sensor) {			//seeing if itsthe reading from the sensor
+       
+			getline(ss, value_type, ',');
+
+			if (stoi(sens_nr) >= 3) {
+				getline(ss, value, ',');
+				multiplier = 10000;
+			}
+
+			average += stoll(value)/ multiplier;	//multiplier in the case uint64 overflows
+			nr_of_readings += 1;
+		}
+
+	}
+	file.close();
+	if (nr_of_readings != 0) return average / nr_of_readings* multiplier;
+	else return average;
 	
-
-
-
-
-	return average;
 }
-*/
+
 
 int main()
 {
 
-	char				buf[BUFFER_LEN];		//Buffer for storing incoming sensor data				
-	char				reqbuf[2];				//Buffer for storing incoming request data
-	uint64_t			ui_sens_64 = 0;			//Int for storing the value of the sensor
-	chrono::time_point<chrono::system_clock>	start, end;			//Timepoints for outputting at 1 Hz
+	char				buf[BUFFER_LEN], sendbuf[BUFFER_LEN], reqbuf[2];		//Buffer for storing incoming sensor data, sending data and request data
+	uint64_t			sendValue = 0, ui_sens_64 = 0;						//Int for storing the value of the sensor and sending the value
+	chrono::time_point<chrono::system_clock>	start, end;					//Timepoints for outputting at 1 Hz
 	std::chrono::duration<double>				elapsed_seconds;
 
 	//Vectors for storing the last 10 values of the sensors
@@ -97,35 +114,42 @@ int main()
 		return 1;
 	}
 
-	//Creating UDP sockets
+	//Creating UDP sockets, one for each port
 	SOCKET sensors_in = socket(AF_INET, SOCK_DGRAM, 0);
-	/*
-	SOCKET request_in = socket(AF_INET, SOCK_DGRAM, 0);
 
 	//Setting up server address and port
-	sockaddr_in request_in_hint;
-	request_in_hint.sin_addr.S_un.S_addr = ADDR_ANY; // Us any IP address available on the machine
-	request_in_hint.sin_family = AF_INET; // Address format is IPv4
-	request_in_hint.sin_port = htons(12346); // Convert from little to big endian
+	sockaddr_in sensors_in_hint;
+	sensors_in_hint.sin_addr.S_un.S_addr = ADDR_ANY;	//Any address
+	sensors_in_hint.sin_family = AF_INET;				//IPv4
+	sensors_in_hint.sin_port = htons(12345);			//assigning port with big endian
 
 	//Binding it to socket
-	if (bind(request_in, (sockaddr*)&request_in_hint, sizeof(request_in_hint)) == SOCKET_ERROR)
-	{
-		std::cout << "Can't bind socket! " << WSAGetLastError() << endl;
-		return 1;
-	}
-	*/
-
-	sockaddr_in sensors_in_hint;
-	sensors_in_hint.sin_addr.S_un.S_addr = ADDR_ANY; // Us any IP address available on the machine
-	sensors_in_hint.sin_family = AF_INET; // Address format is IPv4
-	sensors_in_hint.sin_port = htons(12345); // Convert from little to big endian
-
 	if (bind(sensors_in, (sockaddr*)&sensors_in_hint, sizeof(sensors_in_hint)) == SOCKET_ERROR)
 	{
 		std::cout << "Can't bind socket! " << WSAGetLastError() << endl;
 		return 1;
 	}
+	
+
+	//Same for second socket
+	SOCKET request_in = socket(AF_INET, SOCK_DGRAM, 0);
+
+	sockaddr_in request_in_hint;
+	request_in_hint.sin_addr.S_un.S_addr = ADDR_ANY;	
+	request_in_hint.sin_family = AF_INET;				
+	request_in_hint.sin_port = htons(12346);			
+
+	if (bind(request_in, (sockaddr*)&request_in_hint, sizeof(request_in_hint)) == SOCKET_ERROR)
+	{
+		std::cout << "Can't bind socket! " << WSAGetLastError() << endl;
+		return 1;
+	}
+
+	//Maiking socket set for select()
+	fd_set sockets;
+	FD_ZERO(&sockets);
+	FD_SET(sensors_in, &sockets);
+	FD_SET(request_in, &sockets);
 
 	//Setting up info about client
 	sockaddr_in client; 
@@ -139,115 +163,207 @@ int main()
 		//Clearing memory
 		ZeroMemory(&client, clientLength);
 		ZeroMemory(buf, BUFFER_LEN); 
-		//ZeroMemory(reqbuf, 2); 
+		ZeroMemory(sendbuf, BUFFER_LEN); 
+		ZeroMemory(reqbuf, 2);
+		ui_sens_64 = 0;
+		sendValue = 0;
 
-		//Waiting for message
-		int sens_bytes = recv(sensors_in, buf, BUFFER_LEN, 0);
-		if (sens_bytes == SOCKET_ERROR)
-		{
-			std::cout << "Error receiving from sensors " << WSAGetLastError() << endl;
-			continue;
-		}
-		/*
-		int req_bytes = recvfrom(request_in, reqbuf, 2, 0, (sockaddr*)&client, &clientLength);
-		if (req_bytes == SOCKET_ERROR)
-		{
-			std::cout << "Error receiving from client " << WSAGetLastError() << endl;
-			continue;
-		}
-		
-		*/
-		
-		
-		//Changing the address into humanly readable string
-		char clientIp[256];
-		ZeroMemory(clientIp, 256);
-		inet_ntop(AF_INET, &client.sin_addr, clientIp, 256);
-
-
-
-		//cout << "Recieved request from " << clientIp << " for " << (int)reqbuf[0] << ', ' << (int)reqbuf[1] << endl;
-		
-		//adding the value bytes to the uint64
-		for (int i = BUFFER_LEN - 1; i > 1; i--) {
-			ui_sens_64 = (ui_sens_64 << 8) + buf[i];
-		}
-
-		//Saving the text to the file
-		save_to_txt((int)buf[0], (int)buf[1], ui_sens_64);
-
-		//Adding the value to the corresponding sensor vector
-		switch ((int)buf[0]) {
-		case 0:
-			if (sensor_0.type != (int)buf[1]) {			
-				sensor_0.type = (int)buf[1];
-			}
-			add_to_last_10(sensor_0.vector, ui_sens_64);
-			break;
-		case 1:
-			if (sensor_1.type != (int)buf[1]) {
-				sensor_1.type = (int)buf[1];
-			}
-			add_to_last_10(sensor_1.vector, ui_sens_64);
-			break;
-		case 2:
-			if (sensor_2.type != (int)buf[1]) {
-				sensor_2.type = (int)buf[1];
-			}
-			add_to_last_10(sensor_2.vector, ui_sens_64);
-			break;
-		case 3:
-			if (sensor_3.type != (int)buf[1]) {
-				sensor_3.type = (int)buf[1];
-			}
-			add_to_last_10(sensor_3.vector, ui_sens_64);
-			break;
-		case 4:
-			if (sensor_4.type != (int)buf[1]) {
-				sensor_4.type = (int)buf[1];
-			}
-			add_to_last_10(sensor_4.vector, ui_sens_64);
-			break;
-		case 5:
-			if (sensor_5.type != (int)buf[1]) {
-				sensor_5.type = (int)buf[1];
-			}
-			add_to_last_10(sensor_5.vector, ui_sens_64);
-			break;
-		case 6:
-			if (sensor_6.type != (int)buf[1]) {
-				sensor_6.type = (int)buf[1];
-			}
-			add_to_last_10(sensor_6.vector, ui_sens_64);
-			break;
-		case 7:
-			if (sensor_7.type != (int)buf[1]) {
-				sensor_7.type = (int)buf[1];
-			}
-			add_to_last_10(sensor_7.vector, ui_sens_64);
-			break;
-		case 8:
-			if (sensor_8.type != (int)buf[1]) {
-				sensor_8.type = (int)buf[1];
-			}
-			add_to_last_10(sensor_8.vector, ui_sens_64);
-			break;
-		case 9:
-			if (sensor_9.type != (int)buf[1]) {
-				sensor_9.type = (int)buf[1];
-			}
-			add_to_last_10(sensor_9.vector, ui_sens_64);
-			break;
-
-		
-		
+		//Seeing if any of the sockets are recieving data
+		if (select(3, &sockets, (fd_set*)0, (fd_set*)0, 0) >= 0) {
+		if (select(3, &sockets, (fd_set*)0, (fd_set*)0, 0) >= 0) {
 			
+			//If were getting data from sensors...
+			if (FD_ISSET(sensors_in, &sockets)) {						
+
+				if (int sens_bytes = recv(sensors_in, buf, BUFFER_LEN, 0) == SOCKET_ERROR)
+				{
+					std::cout << "Error receiving from sensors " << WSAGetLastError() << endl;
+					continue;
+				}
+
+				//adding the value bytes to the uint64
+				for (int i = BUFFER_LEN - 1; i > 1; i--) {
+					ui_sens_64 = (ui_sens_64 << 8) + buf[i];
+				}
+
+				//Saving the text to the file
+				save_to_txt((int)buf[0], (int)buf[1], ui_sens_64);
+
+				//Adding the value to the corresponding sensor vector
+				switch ((int)buf[0]) {
+				case 0:
+					if (sensor_0.type != (int)buf[1]) {
+						sensor_0.type = (int)buf[1];
+					}
+					add_to_last_10(sensor_0.vector, ui_sens_64);
+					break;
+				case 1:
+					if (sensor_1.type != (int)buf[1]) {
+						sensor_1.type = (int)buf[1];
+					}
+					add_to_last_10(sensor_1.vector, ui_sens_64);
+					break;
+				case 2:
+					if (sensor_2.type != (int)buf[1]) {
+						sensor_2.type = (int)buf[1];
+					}
+					add_to_last_10(sensor_2.vector, ui_sens_64);
+					break;
+				case 3:
+					if (sensor_3.type != (int)buf[1]) {
+						sensor_3.type = (int)buf[1];
+					}
+					add_to_last_10(sensor_3.vector, ui_sens_64);
+					break;
+				case 4:
+					if (sensor_4.type != (int)buf[1]) {
+						sensor_4.type = (int)buf[1];
+					}
+					add_to_last_10(sensor_4.vector, ui_sens_64);
+					break;
+				case 5:
+					if (sensor_5.type != (int)buf[1]) {
+						sensor_5.type = (int)buf[1];
+					}
+					add_to_last_10(sensor_5.vector, ui_sens_64);
+					break;
+				case 6:
+					if (sensor_6.type != (int)buf[1]) {
+						sensor_6.type = (int)buf[1];
+					}
+					add_to_last_10(sensor_6.vector, ui_sens_64);
+					break;
+				case 7:
+					if (sensor_7.type != (int)buf[1]) {
+						sensor_7.type = (int)buf[1];
+					}
+					add_to_last_10(sensor_7.vector, ui_sens_64);
+					break;
+				case 8:
+					if (sensor_8.type != (int)buf[1]) {
+						sensor_8.type = (int)buf[1];
+					}
+					add_to_last_10(sensor_8.vector, ui_sens_64);
+					break;
+				case 9:
+					if (sensor_9.type != (int)buf[1]) {
+						sensor_9.type = (int)buf[1];
+					}
+					add_to_last_10(sensor_9.vector, ui_sens_64);
+					break;
+
+
+
+
+				}
+
+				//Checking the time
+				end = chrono::system_clock::now();
+				elapsed_seconds = end - start;
+
+				
+			}
+
+			//If were getting requests...
+			if (FD_ISSET(request_in, &sockets)) {
+				
+				if (int req_bytes = recvfrom(request_in, reqbuf, 2, 0, (sockaddr*)&client, &clientLength) == SOCKET_ERROR)
+				{
+					std::cout << "Error receiving from client " << WSAGetLastError() << endl;
+					continue;
+				}
+
+				//Which sensor is requested
+				switch ((int)buf[0]) {
+				case 0:
+					sendbuf[0] = (int)buf[0];											//first byte of packet is sensor number
+					sendbuf[1] = sensor_0.type;											//second byte of packet is data type
+					if ((int)buf[1] == 0) sendValue = sensor_0.vector[0];				//last bytes are the sensor data
+					else if ((int)buf[1] == 1) sendValue = get_v_ave(sensor_0.vector);
+					else if ((int)buf[1] == 2) sendValue = get_ave((int)buf[0]);
+					break;
+				case 1:
+					sendbuf[0] = (int)buf[0];
+					sendbuf[1] = sensor_1.type;
+					if ((int)buf[1] == 0) sendValue = sensor_1.vector[0];
+					else if ((int)buf[1] == 1) sendValue = get_v_ave(sensor_1.vector);
+					else if ((int)buf[1] == 2) sendValue = get_ave((int)buf[0]);
+					break;
+				case 2:
+					sendbuf[0] = (int)buf[0];
+					sendbuf[1] = sensor_2.type;
+					if ((int)buf[1] == 0) sendValue = sensor_2.vector[0];
+					else if ((int)buf[1] == 1) sendValue = get_v_ave(sensor_2.vector);
+					else if ((int)buf[1] == 2) sendValue = get_ave((int)buf[0]);
+					break;
+				case 3:
+					sendbuf[0] = (int)buf[0];
+					sendbuf[1] = sensor_3.type;
+					if ((int)buf[1] == 0) sendValue = sensor_3.vector[0];
+					else if ((int)buf[1] == 1) sendValue = get_v_ave(sensor_3.vector);
+					else if ((int)buf[1] == 2) sendValue = get_ave((int)buf[0]);
+					break;
+				case 4:
+					sendbuf[0] = (int)buf[0];
+					sendbuf[1] = sensor_4.type;
+					if ((int)buf[1] == 0) sendValue = sensor_4.vector[0];
+					else if ((int)buf[1] == 1) sendValue = get_v_ave(sensor_4.vector);
+					else if ((int)buf[1] == 2) sendValue = get_ave((int)buf[0]);
+					break;
+				case 5:
+					sendbuf[0] = (int)buf[0];
+					sendbuf[1] = sensor_5.type;
+					if ((int)buf[1] == 0) sendValue = sensor_5.vector[0];
+					else if ((int)buf[1] == 1) sendValue = get_v_ave(sensor_5.vector);
+					else if ((int)buf[1] == 2) sendValue = get_ave((int)buf[0]);
+					break;
+				case 6:
+					sendbuf[0] = (int)buf[0];
+					sendbuf[1] = sensor_6.type;
+					if ((int)buf[1] == 0) sendValue = sensor_6.vector[0];
+					else if ((int)buf[1] == 1) sendValue = get_v_ave(sensor_6.vector);
+					else if ((int)buf[1] == 2) sendValue = get_ave((int)buf[0]);
+					break;
+				case 7:
+					sendbuf[0] = (int)buf[0];
+					sendbuf[1] = sensor_7.type;
+					if ((int)buf[1] == 0) sendValue = sensor_7.vector[0];
+					else if ((int)buf[1] == 1) sendValue = get_v_ave(sensor_7.vector);
+					else if ((int)buf[1] == 2) sendValue = get_ave((int)buf[0]);
+					break;
+				case 8:
+					sendbuf[0] = (int)buf[0];
+					sendbuf[1] = sensor_8.type;
+					if ((int)buf[1] == 0) sendValue = sensor_8.vector[0];
+					else if ((int)buf[1] == 1) sendValue = get_v_ave(sensor_8.vector);
+					else if ((int)buf[1] == 2) sendValue = get_ave((int)buf[0]);
+					break;
+				case 9:
+					sendbuf[0] = (int)buf[0];
+					sendbuf[1] = sensor_9.type;
+					if ((int)buf[1] == 0) sendValue = sensor_9.vector[0];
+					else if ((int)buf[1] == 1) sendValue = get_v_ave(sensor_9.vector);
+					else if ((int)buf[1] == 2) sendValue = get_ave((int)buf[0]);
+					break;
+
+
+
+
+				}
+				
+				//Copying the bytes from uint64 to packet
+				std::memcpy(sendbuf+2, &sendValue, BUFFER_LEN-2);
+
+				//Sending packet back
+				if (int send_bytes = sendto(request_in, sendbuf, BUFFER_LEN, 0, (sockaddr*)&client, clientLength) == SOCKET_ERROR)
+				{
+					std::cout << "Error sending to client " << WSAGetLastError() << endl;
+					continue;
+				}
+
+
+			}
 		}
-
-		//Checking the time
-		end = chrono::system_clock::now();
-		elapsed_seconds = end - start;
-
 		//if more then 1 second has passed, then show the averages
 		if (elapsed_seconds.count() > 1) {
 			std::cout << "Sensor 0: " << get_v_ave(sensor_0.vector) << "\n";
@@ -262,13 +378,12 @@ int main()
 			std::cout << "Sensor 9: " << get_v_ave(sensor_9.vector) << "\n" << "\n";
 			start = chrono::system_clock::now(); //Start the timer again
 		}
-		
-
-		
 	}
 	
-	// Close socket
+	// Closing sockets
 	closesocket(sensors_in);
+	closesocket(request_in);
+
 	// Shutdown winsock
 	WSACleanup();
 	return 0;
